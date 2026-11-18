@@ -1,22 +1,24 @@
 import re
 import secrets
 from pathlib import Path
+from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .db import get_db, init_db
-from .keitaro import KeitaroError, call as ktr
+from .keitaro import KeitaroError
+from .keitaro import call as ktr
 from .models import Campaign, Stream, StreamOffer
 
 app = FastAPI(title="Keitaro wrapper")
 
 
 @app.exception_handler(KeitaroError)
-def keitaro_error_handler(_request, exc: KeitaroError):
+def keitaro_error_handler(_: Request, exc: KeitaroError) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": exc.detail})
 
 
@@ -65,7 +67,18 @@ def recalc(stream: Stream) -> None:
             offer.share = 0
 
 
-def snapshot_of(stream: Stream) -> list[dict]:
+def refresh_dirty(stream: Stream) -> None:
+    """Dirty = what Push would send differs from the last fetch/push."""
+    before = {
+        int(entry["offer_id"]): int(entry.get("share", 0))
+        for entry in stream.snapshot or []
+        if not entry.get("removed")
+    }
+    now = {offer.offer_id: offer.share for offer in stream.offers if not offer.removed}
+    stream.dirty = before != now
+
+
+def snapshot_of(stream: Stream) -> list[dict[str, Any]]:
     return [
         {
             "offer_id": offer.offer_id,
@@ -81,7 +94,7 @@ def snapshot_of(stream: Stream) -> list[dict]:
 # ---------------------------------------------------------------- serializers
 
 
-def stream_json(stream: Stream) -> dict:
+def stream_json(stream: Stream) -> dict[str, Any]:
     return {
         "id": stream.id,
         "keitaro_id": stream.keitaro_id,
@@ -103,7 +116,7 @@ def stream_json(stream: Stream) -> dict:
     }
 
 
-def campaign_json(campaign: Campaign) -> dict:
+def campaign_json(campaign: Campaign) -> dict[str, Any]:
     return {
         "id": campaign.id,
         "keitaro_id": campaign.keitaro_id,
@@ -116,7 +129,7 @@ def campaign_json(campaign: Campaign) -> dict:
     }
 
 
-def campaign_summary(campaign: Campaign) -> dict:
+def campaign_summary(campaign: Campaign) -> dict[str, Any]:
     return {
         "id": campaign.id,
         "keitaro_id": campaign.keitaro_id,
@@ -160,7 +173,9 @@ def offer_name(offer_id: int) -> str:
 
 def sync_campaign(db: Session, campaign: Campaign) -> None:
     """Pull flows from Keitaro. Offers missing there stay locally as 'removed'."""
-    remote_streams = ktr("GET", f"/campaigns/{campaign.keitaro_id}/streams")
+    remote_streams: list[dict[str, Any]] = ktr(
+        "GET", f"/campaigns/{campaign.keitaro_id}/streams"
+    )
     for remote in remote_streams:
         stream = db.query(Stream).filter_by(keitaro_id=remote["id"]).first()
         if not stream:
@@ -174,7 +189,10 @@ def sync_campaign(db: Session, campaign: Campaign) -> None:
         stream.filters = remote.get("filters") or []
         stream.dirty = False
 
-        remote_offers = {item["offer_id"]: item.get("share", 0) for item in remote.get("offers") or []}
+        raw_offers: list[dict[str, Any]] = remote.get("offers") or []
+        remote_offers: dict[int, int] = {
+            int(item["offer_id"]): int(item.get("share", 0)) for item in raw_offers
+        }
         known = {offer.offer_id: offer for offer in stream.offers}
         for offer_id, share in remote_offers.items():
             offer = known.get(offer_id)
@@ -197,10 +215,10 @@ def sync_campaign(db: Session, campaign: Campaign) -> None:
 
 
 @app.get("/api/meta")
-def get_meta():
-    domains = ktr("GET", "/domains")
-    groups = ktr("GET", "/groups?type=campaigns")
-    sources = ktr("GET", "/traffic_sources")
+def get_meta() -> dict[str, list[dict[str, Any]]]:
+    domains: list[dict[str, Any]] = ktr("GET", "/domains")
+    groups: list[dict[str, Any]] = ktr("GET", "/groups?type=campaigns")
+    sources: list[dict[str, Any]] = ktr("GET", "/traffic_sources")
     return {
         "domains": [{"id": item["id"], "name": item["name"]} for item in domains],
         "groups": [{"id": item["id"], "name": item["name"]} for item in groups],
@@ -209,9 +227,9 @@ def get_meta():
 
 
 @app.get("/api/offers")
-def search_offers(q: str = Query("")):
+def search_offers(q: str = Query("")) -> list[dict[str, Any]]:
     query = q.strip().lower()
-    offers = ktr("GET", "/offers")
+    offers: list[dict[str, Any]] = ktr("GET", "/offers")
     matches = [
         offer
         for offer in offers
@@ -227,26 +245,28 @@ def search_offers(q: str = Query("")):
 
 
 @app.get("/api/campaigns")
-def list_campaigns(db: Session = Depends(get_db)):
+def list_campaigns(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     campaigns = db.query(Campaign).order_by(Campaign.id.desc()).all()
     return [campaign_summary(campaign) for campaign in campaigns]
 
 
 @app.get("/api/campaigns/{campaign_id}")
-def get_campaign_detail(campaign_id: int, db: Session = Depends(get_db)):
+def get_campaign_detail(campaign_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     return campaign_json(get_campaign(db, campaign_id))
 
 
 @app.post("/api/campaigns")
-def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db)):
+def create_campaign(
+    payload: CampaignCreate, db: Session = Depends(get_db)
+) -> dict[str, Any]:
     geo = payload.geo.strip().upper()
     if not re.fullmatch(r"[A-Z]{2}", geo):
         raise HTTPException(400, "Geo must be a two-letter country code, e.g. AU")
 
-    offer = ktr("GET", f"/offers/{payload.offer_id}")
-    domains = ktr("GET", "/domains")
-    groups = ktr("GET", "/groups?type=campaigns")
-    sources = ktr("GET", "/traffic_sources")
+    offer: dict[str, Any] = ktr("GET", f"/offers/{payload.offer_id}")
+    domains: list[dict[str, Any]] = ktr("GET", "/domains")
+    groups: list[dict[str, Any]] = ktr("GET", "/groups?type=campaigns")
+    sources: list[dict[str, Any]] = ktr("GET", "/traffic_sources")
     domain = next((item for item in domains if item["id"] == payload.domain_id), None)
     group = next((item for item in groups if item["id"] == payload.group_id), None)
     source = next((item for item in sources if item["id"] == payload.traffic_source_id), None)
@@ -254,7 +274,7 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db)):
         raise HTTPException(400, "Unknown domain, group or traffic source")
 
     slug = re.sub(r"[^a-z0-9]+", "-", payload.name.lower()).strip("-") or "campaign"
-    keitaro_campaign = ktr(
+    keitaro_campaign: dict[str, Any] = ktr(
         "POST",
         "/campaigns",
         json={
@@ -266,10 +286,10 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db)):
             "traffic_source_id": payload.traffic_source_id,
         },
     )
-    campaign_id = keitaro_campaign["id"]
+    campaign_id = int(keitaro_campaign["id"])
 
     try:
-        geo_flow = ktr(
+        geo_flow: dict[str, Any] = ktr(
             "POST",
             "/streams",
             json={
@@ -287,7 +307,7 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db)):
                 "triggers": [],
             },
         )
-        offer_flow = ktr(
+        offer_flow: dict[str, Any] = ktr(
             "POST",
             "/streams",
             json={
@@ -339,10 +359,12 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db)):
         )
         db.add(stream)
         db.flush()
-        for item in data.get("offers") or []:
-            name = offer["name"] if item["offer_id"] == payload.offer_id else offer_name(item["offer_id"])
+        raw_offers: list[dict[str, Any]] = data.get("offers") or []
+        for item in raw_offers:
+            offer_id = int(item["offer_id"])
+            name = offer["name"] if offer_id == payload.offer_id else offer_name(offer_id)
             stream.offers.append(
-                StreamOffer(offer_id=item["offer_id"], name=name, share=item.get("share", 0))
+                StreamOffer(offer_id=offer_id, name=name, share=int(item.get("share", 0)))
             )
         stream.snapshot = snapshot_of(stream)
 
@@ -352,10 +374,12 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db)):
 
 
 @app.post("/api/campaigns/import")
-def import_campaign(payload: CampaignImport, db: Session = Depends(get_db)):
+def import_campaign(
+    payload: CampaignImport, db: Session = Depends(get_db)
+) -> dict[str, Any]:
     campaign = db.query(Campaign).filter_by(keitaro_id=payload.keitaro_id).first()
     if not campaign:
-        data = ktr("GET", f"/campaigns/{payload.keitaro_id}")
+        data: dict[str, Any] = ktr("GET", f"/campaigns/{payload.keitaro_id}")
         campaign = Campaign(
             keitaro_id=data["id"],
             name=data.get("name") or f"Campaign {data['id']}",
@@ -373,7 +397,9 @@ def import_campaign(payload: CampaignImport, db: Session = Depends(get_db)):
 
 
 @app.post("/api/campaigns/{campaign_id}/fetch")
-def fetch_streams(campaign_id: int, db: Session = Depends(get_db)):
+def fetch_streams(
+    campaign_id: int, db: Session = Depends(get_db)
+) -> dict[str, Any]:
     campaign = get_campaign(db, campaign_id)
     sync_campaign(db, campaign)
     db.refresh(campaign)
@@ -384,11 +410,13 @@ def fetch_streams(campaign_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/streams/{stream_id}/offers")
-def add_offer(stream_id: int, payload: OfferIn, db: Session = Depends(get_db)):
+def add_offer(
+    stream_id: int, payload: OfferIn, db: Session = Depends(get_db)
+) -> dict[str, Any]:
     stream = get_stream(db, stream_id)
     if not stream.editable:
         raise HTTPException(400, "Offers can only be managed in offer flows")
-    offer = ktr("GET", f"/offers/{payload.offer_id}")
+    offer: dict[str, Any] = ktr("GET", f"/offers/{payload.offer_id}")
     row = find_offer(stream, payload.offer_id)
     if row and not row.removed:
         raise HTTPException(400, "Offer is already in the flow")
@@ -400,13 +428,15 @@ def add_offer(stream_id: int, payload: OfferIn, db: Session = Depends(get_db)):
             StreamOffer(offer_id=payload.offer_id, name=offer.get("name") or str(payload.offer_id))
         )
     recalc(stream)
-    stream.dirty = True
+    refresh_dirty(stream)
     db.commit()
     return stream_json(stream)
 
 
 @app.delete("/api/streams/{stream_id}/offers/{offer_id}")
-def remove_offer(stream_id: int, offer_id: int, db: Session = Depends(get_db)):
+def remove_offer(
+    stream_id: int, offer_id: int, db: Session = Depends(get_db)
+) -> dict[str, Any]:
     stream = get_stream(db, stream_id)
     row = find_offer(stream, offer_id)
     if not row or row.removed:
@@ -414,26 +444,33 @@ def remove_offer(stream_id: int, offer_id: int, db: Session = Depends(get_db)):
     row.removed = True
     row.pinned = False
     recalc(stream)
-    stream.dirty = True
+    refresh_dirty(stream)
     db.commit()
     return stream_json(stream)
 
 
 @app.post("/api/streams/{stream_id}/offers/{offer_id}/restore")
-def restore_offer(stream_id: int, offer_id: int, db: Session = Depends(get_db)):
+def restore_offer(
+    stream_id: int, offer_id: int, db: Session = Depends(get_db)
+) -> dict[str, Any]:
     stream = get_stream(db, stream_id)
     row = find_offer(stream, offer_id)
     if not row:
         raise HTTPException(404, "Offer is not known in the flow")
     row.removed = False
     recalc(stream)
-    stream.dirty = True
+    refresh_dirty(stream)
     db.commit()
     return stream_json(stream)
 
 
 @app.post("/api/streams/{stream_id}/offers/{offer_id}/pin")
-def pin_offer(stream_id: int, offer_id: int, payload: PinIn, db: Session = Depends(get_db)):
+def pin_offer(
+    stream_id: int,
+    offer_id: int,
+    payload: PinIn,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     stream = get_stream(db, stream_id)
     row = find_offer(stream, offer_id)
     if not row or row.removed:
@@ -444,12 +481,12 @@ def pin_offer(stream_id: int, offer_id: int, payload: PinIn, db: Session = Depen
 
 
 @app.post("/api/streams/{stream_id}/push")
-def push_stream(stream_id: int, db: Session = Depends(get_db)):
+def push_stream(stream_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     stream = get_stream(db, stream_id)
     if not stream.editable:
         raise HTTPException(400, "Offers can only be managed in offer flows")
     active = [offer for offer in stream.offers if not offer.removed]
-    response = ktr(
+    response: dict[str, Any] = ktr(
         "PUT",
         f"/streams/{stream.keitaro_id}",
         json={
@@ -459,7 +496,10 @@ def push_stream(stream_id: int, db: Session = Depends(get_db)):
             ]
         },
     )
-    shares = {item["offer_id"]: item.get("share", 0) for item in response.get("offers") or []}
+    raw_offers: list[dict[str, Any]] = response.get("offers") or []
+    shares: dict[int, int] = {
+        int(item["offer_id"]): int(item.get("share", 0)) for item in raw_offers
+    }
     for offer in stream.offers:
         if offer.offer_id in shares:
             offer.share = shares[offer.offer_id]
@@ -470,9 +510,11 @@ def push_stream(stream_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/streams/{stream_id}/cancel")
-def cancel_stream(stream_id: int, db: Session = Depends(get_db)):
+def cancel_stream(stream_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     stream = get_stream(db, stream_id)
-    snapshot = {item["offer_id"]: item for item in stream.snapshot or []}
+    snapshot: dict[int, dict[str, Any]] = {
+        int(item["offer_id"]): item for item in stream.snapshot or []
+    }
     for row in list(stream.offers):
         entry = snapshot.pop(row.offer_id, None)
         if entry is None:

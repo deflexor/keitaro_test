@@ -9,3 +9,7 @@ dependencies = [
     "httpx",
     "python-dotenv",
 ]
+
+[tool.ruff.lint]
+# FastAPI's Depends() in defaults is the documented pattern.
+ignore = ["B008"]

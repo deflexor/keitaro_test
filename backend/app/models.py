@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -22,7 +23,7 @@ class Campaign(Base):
     domain_name: Mapped[str] = mapped_column(String, default="")
     group_name: Mapped[str] = mapped_column(String, default="")
     source_name: Mapped[str] = mapped_column(String, default="")
-    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
 
     streams: Mapped[list["Stream"]] = relationship(
         back_populates="campaign",
@@ -42,10 +43,10 @@ class Stream(Base):
     schema_name: Mapped[str] = mapped_column(String, default="")
     action_type: Mapped[str] = mapped_column(String, default="")
     action_payload: Mapped[str] = mapped_column(String, default="")
-    filters: Mapped[list] = mapped_column(JSON, default=list)
+    filters: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     dirty: Mapped[bool] = mapped_column(Boolean, default=False)
     # Full offer state (including archived ones) as of the last fetch/push.
-    snapshot: Mapped[list] = mapped_column(JSON, default=list)
+    snapshot: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
 
     campaign: Mapped[Campaign] = relationship(back_populates="streams")
     offers: Mapped[list["StreamOffer"]] = relationship(

@@ -1,5 +1,6 @@
 import os
 import time
+from typing import Any
 
 import httpx
 
@@ -16,13 +17,14 @@ _client = httpx.Client(
 
 
 class KeitaroError(Exception):
-    def __init__(self, status_code: int, detail):
+    def __init__(self, status_code: int, detail: Any):
         self.status_code = status_code
         self.detail = detail
         super().__init__(detail)
 
 
-def call(method: str, path: str, **kwargs):
+def call(method: str, path: str, **kwargs: Any) -> Any:
+    response = None
     for attempt in range(3):
         try:
             response = _client.request(method, path, **kwargs)
@@ -31,6 +33,7 @@ def call(method: str, path: str, **kwargs):
             if attempt == 2:
                 raise KeitaroError(502, f"Keitaro request failed: {exc}") from exc
             time.sleep(0.5 * (attempt + 1))
+    assert response is not None
     if response.status_code >= 400:
         try:
             detail = response.json()
